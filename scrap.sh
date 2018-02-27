@@ -1,14 +1,23 @@
-#!/bin/sh
+#!/bin/bash
+
+# Define a timestamp function
+timestamp() {
+  date +"%T"
+}
+
+source venv/bin/activate
 
 while
     #statements
     python scrap.py
     returncode=$?
 
-    if [ $returncode > 0 ]; then
+    if [ $returncode -ne 0 ]; then
         echo "Ocurrió algún error. Reiniciando script..."
     fi
 
     # check while condition
-    [ $returncode > 0 ]
+    [ $returncode -ne 0 ]
 do :; done
+
+timestamp
