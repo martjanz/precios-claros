@@ -12,7 +12,7 @@ import sqlite
 
 def main():
     # global variables (wrapper class, maybe?)
-    stemUrl = 'https://8kdx6rx8h4.execute-api.us-east-1.amazonaws.com/prod/'
+    stemUrl = 'https://d3e6htiiul5ek9.cloudfront.net/dev/'
     datadir = 'data'
     configFile = '_progress.json' # Configuración, info de avance
     posFile = datadir + '/comercios.json' # Comercios, sucursales, puntos de venta
@@ -39,8 +39,11 @@ def main():
                 i,
                 comercio['id'],
                 comercio['comercioId'],
+                comercio['comercioRazonSocial'],
                 comercio['banderaId'],
                 comercio['banderaDescripcion'],
+                comercio['sucursalTipo'],
+                comercio['sucursalNombre'],
                 comercio['provincia'],
                 comercio['localidad'],
                 comercio['direccion'],
@@ -50,9 +53,10 @@ def main():
             i += 1
 
         dbLayer.insertMany('comercios',
-            '(_id, id, comercioId, banderaId, banderaDescripcion, provincia, localidad, \
-            direccion, lat, lng)',
-            '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            '(_id, id, comercio_id, comercio_razon_social, bandera_id, \
+                bandera_descripcion, sucursal_tipo, sucursal_nombre, \
+                provincia, localidad, direccion, lat, lng)',
+            '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             insertData
         )
 
@@ -99,7 +103,6 @@ def main():
         with open('_cantarticulos.json', 'w') as outfile:
             ujson.dump(cantArticulos, outfile)
 
-    comercios = comCursor.execute("SELECT * FROM comercios WHERE pendiente = 1").fetchall()
 
     if len(comercios) == 0:
         progress['productos'] = True
@@ -115,7 +118,7 @@ def main():
                 cantProductos = item['total']
                 maxPermitido = item['maxLimitPermitido']
 
-        articulos = getArticulos(stemUrl, comercio['id'], cantProductos, maxPermitido)
+        articulos = getArticulos(stemUrl, comercio, cantProductos, maxPermitido)
 
         # Graba artículos en db
         insertData = []
@@ -166,6 +169,9 @@ def main():
 def getSucursales(stemUrl):
     sucursales = []
     mainUrl = stemUrl + 'sucursales'
+    timeoutSecs = 20 # seconds to launch timeout exception
+    concurrents = 20 # max concurrent requests
+
 
     print 'Recolectando información sobre comercios...'
     data = getJsonData(mainUrl)
@@ -179,8 +185,9 @@ def getSucursales(stemUrl):
     for x in xrange(1, cantPages + 1):
         urls.append(mainUrl + '?offset=' + str((x - 1) * maxLimit) + '&limit=' + str(maxLimit))
 
-    rs = (grequests.get(u) for u in urls)
-    responses = grequests.map(rs)
+    rs = (grequests.get(u, stream = False, timeout = timeoutSecs,
+                        headers = {'User-Agent': 'Mozilla/5.0'}) for u in urls)
+    responses = grequests.imap(rs, size = concurrents)
     for response in responses:
         data = ujson.loads(response.content)
         sucursales = sucursales + data['sucursales']
@@ -201,24 +208,28 @@ def getCategorias(stemUrl):
 
 
 # Obtiene productos de un comercio
-def getArticulos(stemUrl, idComercio, totalProductos, maxPermitido):
-    # default seconds to launch timeout exception
-    timeoutSecs = 20
-    concurrents = 20
+def getArticulos(stemUrl, comercio, totalProductos, maxPermitido):
+
+    timeoutSecs = 20 # seconds to launch timeout exception
+    concurrents = 10
     articulos = []
     urls = []
 
-    mainUrl = stemUrl + 'productos' + '?id_sucursal=' + idComercio
+    mainUrl = stemUrl + 'productos' + '?id_sucursal=' + comercio['id']
     cantPages = int(math.ceil(totalProductos / maxPermitido))
 
-    print ('Descargando ' + str(totalProductos) + ' productos de comercio ' + str(idComercio) + '...')
+    print ("Descargando %s artículos del %s %s %s..." % (str(totalProductos),
+        comercio['sucursal_tipo'].encode('utf-8'),
+        comercio['bandera_descripcion'].encode('utf-8'),
+        comercio['sucursal_nombre'].encode('utf-8')))
 
     for x in xrange(1, cantPages + 1):
         urls.append(mainUrl + \
             '&offset=' + str((x - 1) * maxPermitido) + \
             '&limit=' + str(maxPermitido))
 
-    rs = (grequests.get(u, stream = False, timeout = timeoutSecs) for u in urls)
+    rs = (grequests.get(u, stream = False, timeout = timeoutSecs,
+                        headers = {'User-Agent': 'Mozilla/5.0'}) for u in urls)
     responses = grequests.imap(rs, exception_handler = timeoutExceptionHandler, size = concurrents)
 
     for response in responses:
@@ -231,60 +242,55 @@ def getArticulos(stemUrl, idComercio, totalProductos, maxPermitido):
         else:
             try:
                 data = ujson.loads(response)
-                # print "--- try ---"
-                # print data
-                # data = data['content']
             except:
-                # print response
                 raise Exception()
 
         if 'errorMessage' in data:
             # Algo falló en el servidor.
+            print response.url
             raise Exception('Server Error in productos: ' + data['errorMessage'])
 
         if 'productos' not in data:
-            # print '--- dir(data) ---'
-            # print dir(data)
-            # print '--- data ---'
-            # print data
             raise Exception()
 
         articulos = articulos + data['productos']
 
     return articulos
 
+
 def getCantArticulos(stemUrl, comercios):
     timeoutSecs = 30
     mainUrl = stemUrl + 'productos' + '?id_sucursal='
-    concurrents = 20
+    concurrents = 5
     urls = []
     reqCounter = 0
-    responses = []
+    result = []
 
     print "Obteniendo cantidad de artículos por comercio..."
 
-    session = requests.Session()
     for comercio in comercios:
         urls.append(mainUrl + comercio['id'])
 
     rs = (grequests.get(u,
             stream = False,
-            session = session,
-            timeout = timeoutSecs) for u in urls)
+            timeout = timeoutSecs,
+            headers = {'User-Agent': 'Mozilla/5.0'}) for u in urls)
 
-    for r in grequests.imap(rs, size = concurrents):
-        response = ujson.loads(r.text)
-        idComercio = r.url[r.url.rfind('=', 0, len(r.url)) + 1:]
+    responses = grequests.imap(rs, size = concurrents)
 
-        responses.append({
+    for response in responses:
+        data = ujson.loads(response.text)
+        idComercio = response.url[response.url.rfind('=', 0, len(response.url)) + 1:]
+
+        result.append({
             "id": idComercio,
-            "total": response['total'],
-            "maxLimitPermitido": response['maxLimitPermitido'],
+            "total": data['total'],
+            "maxLimitPermitido": data['maxLimitPermitido'],
         })
 
-        r.close() # Close open connections
+        response.close() # Close open connections
 
-    return responses
+    return result
 
 
 def timeoutExceptionHandler(request, exception):
@@ -295,7 +301,8 @@ def timeoutExceptionHandler(request, exception):
 
     productos = []
 
-    rs = [grequests.get(request.url, timeout = retryTimeout)]
+    rs = [grequests.get(request.url, timeout = retryTimeout,
+                        headers = {'User-Agent': 'Mozilla/5.0'})]
     responses = grequests.map(rs, exception_handler = timeoutExceptionHandler)
 
     for response in responses:
@@ -308,11 +315,8 @@ def timeoutExceptionHandler(request, exception):
         else:
             try:
                 data = ujson.loads(response)
-                # print "--- try ---"
-                # print data
                 data = data['content']
             except:
-                # print response
                 raise Exception()
 
         if 'errorMessage' in data:
@@ -320,10 +324,6 @@ def timeoutExceptionHandler(request, exception):
             raise Exception('Server Error in productos: ' + data['errorMessage'])
 
         if 'productos' not in data:
-            # print '--- dir(data) ---'
-            # print dir(data)
-            # print '--- data ---'
-            # print data
             raise Exception()
 
         productos = productos + data['productos']
@@ -335,7 +335,7 @@ def timeoutExceptionHandler(request, exception):
 # Get json data from url.
 #   Returns dict
 def getJsonData(url):
-    req = requests.get(url, timeout = 10)
+    req = requests.get(url, headers = {'User-Agent': 'Mozilla/5.0'})
     data = req.json()
 
     # chequear estado = 200, si no reintentar x veces.
